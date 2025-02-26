@@ -6,7 +6,7 @@ lazycomm is a lightweight HTTP server for running scripts as "webhooks." it was 
 
 ## usage
 
-1. place your python scripts in the `scripts` directory. to prevent pushing them to the repo, prefix script names with `.`.
+1. place your python scripts in the `scripts` directory. to prevent pushing them to the repo, prefix script names with `.`
 2. prefixing script names with `_` will prevent them from being run, and also prevent them from being pushed to the repo.
 3. install your userscripts in your browser and ensure they use the correct port (default is `6565`).
 4. run `go run main.go` to start the server. you can also run the compiled binary, but ensure the `scripts` directory is in the same location as the binary.
@@ -58,3 +58,14 @@ import sys # you can import any modules that exist in the python environment.
 sys.stderr.write("this will be captured as an error.") # will only be logged if the script exits with a non-zero exit code.
 exit(1) # will be logged as an error.
 ```
+
+## todo / plans for future
+
+- [ ] refactor to be more readable
+- [ ] confirm that closing connection after respond does not cause any issues
+- [ ] websocket connections
+
+## contributing
+
+please feel free to open issues or pull requests for any bugs or feature requests.
+some features are not yet complete (or) may be buggy. please open an issue if you encounter any bugs.
