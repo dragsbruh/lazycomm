@@ -1,8 +1,15 @@
+# tooling folders
 tmp
-.log
 .vscode
+.log
+__pycache__
+
+# disabled and private scripts
 .*.py
 .*.js
+_*.py
+_*.js
+
+# config and secrets
 config.toml
-__pycache__
 .env

@@ -7,17 +7,13 @@ import sys
 lzy_prefix = "LZY-:"
 
 # read metadata
-line = sys.stdin.readline()
-
-# parse metadata to headers size query size and body size
-headers_size = int(line.split(" ")[0])
-query_size = int(line.split(" ")[1])
-body_size = int(line.split(" ")[2])
+line = sys.stdin.buffer.readline().decode()
+headers_size, query_size, body_size = map(int, line.split())
 
 # read headers query body based on given metadata
-headers = json.loads(sys.stdin.read(headers_size))
-query = json.loads(sys.stdin.read(query_size))
-body = sys.stdin.read(body_size)
+headers = json.loads(sys.stdin.buffer.read(headers_size).decode())
+query = json.loads(sys.stdin.buffer.read(query_size).decode())
+body = sys.stdin.buffer.read(body_size)
 
 # merge query and headers for response
 for k, v in query.items():
@@ -25,7 +21,7 @@ for k, v in query.items():
     
 # prepare response
 resheaders = json.dumps(headers).encode()
-resbody = body.encode()
+resbody = body
 
 status_code = 200
 

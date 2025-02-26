@@ -11,6 +11,8 @@ import (
 	"path"
 	"strconv"
 	"strings"
+
+	"github.com/sirupsen/logrus"
 )
 
 // prefix used for initial communication to send/receive metadata between `lazycomm.py` and server
@@ -58,12 +60,16 @@ func ExecuteScript(scriptName string, headers map[string]string, query map[strin
 	if strings.HasPrefix(scriptName, "_") || strings.HasPrefix(scriptName, ".") {
 		return ScriptDisabled{ScriptName: scriptName}
 	}
-	path := getScriptPath(scriptName)
-	if path == "" {
+	scriptPath := getScriptPath(scriptName)
+	if scriptPath == "" {
+		disabledPath := path.Join(".", "scripts", "_"+scriptName+".py")
+		if _, err := os.Stat(disabledPath); err == nil {
+			return ScriptDisabled{ScriptName: scriptName}
+		}
 		return ScriptNotFound{ScriptName: scriptName}
 	}
 
-	cmd := exec.Command("python", "-u", path)
+	cmd := exec.Command("python", "-u", scriptPath)
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -82,6 +88,8 @@ func ExecuteScript(scriptName string, headers map[string]string, query map[strin
 		return ScriptError{ScriptName: scriptName}
 	}
 
+	logrus.Infof("started script %s", scriptName)
+
 	var capturedStderr strings.Builder
 
 	go func() {
@@ -90,7 +98,12 @@ func ExecuteScript(scriptName string, headers map[string]string, query map[strin
 			line := scanner.Text()
 
 			if strings.HasPrefix(line, LZY_PREFIX) {
-				handleScriptResponse(strings.TrimPrefix(line, LZY_PREFIX), stdout, w)
+				statusCode := handleScriptResponse(strings.TrimPrefix(line, LZY_PREFIX), stdout, w)
+				if statusCode == -10 {
+					logrus.Errorf("response parse error for %s", scriptName)
+				} else {
+					logrus.Infof("script %s responded with status code %d", scriptName, statusCode)
+				}
 				return
 			}
 		}
@@ -106,16 +119,18 @@ func ExecuteScript(scriptName string, headers map[string]string, query map[strin
 
 	headersJson, err := json.Marshal(headers)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to marshal headers: %s", err.Error())
+		logrus.Errorf("failed to marshal headers: %s", err.Error())
 		w.WriteHeader(500)
 		w.Write([]byte("failed to marshal headers"))
+		return nil
 	}
 
 	queryJson, err := json.Marshal(query)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to marshal query: %s", err.Error())
+		logrus.Errorf("failed to marshal query: %s", err.Error())
 		w.WriteHeader(500)
 		w.Write([]byte("failed to marshal query"))
+		return nil
 	}
 
 	stdin.Write(fmt.Appendf(nil, "%d %d %d\n", len(headersJson), len(queryJson), len(body)))
@@ -126,10 +141,11 @@ func ExecuteScript(scriptName string, headers map[string]string, query map[strin
 	stdin.Close()
 
 	if err := cmd.Wait(); err != nil {
-		writeErrorLog(scriptName, capturedStderr.String())
+		logStderr(scriptName, capturedStderr.String())
+		logrus.Errorf("script exited with exit code %d. stderr was logged", cmd.ProcessState.ExitCode())
+
 		w.WriteHeader(500)
 		w.Write(fmt.Appendf(nil, "script exited with exit code %d. stderr was logged", cmd.ProcessState.ExitCode()))
-		return nil
 	}
 
 	return nil
@@ -151,16 +167,17 @@ func getScriptPath(scriptName string) string {
 	return ""
 }
 
-func writeErrorLog(scriptName string, log string) {
+func logStderr(scriptName string, log string) {
 	os.MkdirAll(LogsDir, 0755)
 	logPath := path.Join(LogsDir, scriptName+".log")
+
 	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to open log file for writing: %s", err.Error())
 		return
 	}
-
 	defer f.Close()
+
 	_, err = f.WriteString(log)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to write to log file: %s", err.Error())
@@ -169,13 +186,13 @@ func writeErrorLog(scriptName string, log string) {
 	f.WriteString("\n-----------------------------\n")
 }
 
-func handleScriptResponse(metadata string, stdout io.Reader, w http.ResponseWriter) {
+func handleScriptResponse(metadata string, stdout io.Reader, w http.ResponseWriter) int {
 	parts := strings.Split(metadata, " ")
 
 	if len(parts) < 3 {
 		w.WriteHeader(500)
 		w.Write([]byte("invalid respond command sent by script"))
-		return
+		return -10
 	}
 
 	statusCodeText := parts[0]
@@ -184,15 +201,15 @@ func handleScriptResponse(metadata string, stdout io.Reader, w http.ResponseWrit
 
 	statusCode, ok := parseIntOrFail(statusCodeText, "status code", w)
 	if !ok {
-		return
+		return -10
 	}
 	headersSize, ok := parseIntOrFail(headersSizeText, "headers size", w)
 	if !ok {
-		return
+		return -10
 	}
 	bodySize, ok := parseIntOrFail(bodySizeText, "body size", w)
 	if !ok {
-		return
+		return -10
 	}
 
 	headersBuf := make([]byte, headersSize)
@@ -200,7 +217,7 @@ func handleScriptResponse(metadata string, stdout io.Reader, w http.ResponseWrit
 	if err != nil {
 		w.WriteHeader(500)
 		w.Write([]byte("failed to read headers from script"))
-		return
+		return -10
 	}
 
 	bodyBuf := make([]byte, bodySize)
@@ -208,7 +225,7 @@ func handleScriptResponse(metadata string, stdout io.Reader, w http.ResponseWrit
 	if err != nil {
 		w.WriteHeader(500)
 		w.Write([]byte("failed to read body from script"))
-		return
+		return -10
 	}
 
 	headers := make(map[string]string)
@@ -216,14 +233,17 @@ func handleScriptResponse(metadata string, stdout io.Reader, w http.ResponseWrit
 	if err != nil {
 		w.WriteHeader(500)
 		w.Write([]byte("failed to parse json headers from script"))
-		return
+		return -10
 	}
 
 	for k, v := range headers {
 		w.Header().Set(k, v)
 	}
+
 	w.WriteHeader(statusCode)
 	w.Write(bodyBuf)
+
+	return statusCode
 }
 
 func parseIntOrFail(value string, title string, w http.ResponseWriter) (int, bool) {
