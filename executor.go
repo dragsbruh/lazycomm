@@ -91,6 +91,7 @@ func ExecuteScript(scriptName string, headers map[string]string, query map[strin
 	logrus.Infof("started script %s", scriptName)
 
 	var capturedStderr strings.Builder
+	responseSent := make(chan struct{})
 
 	go func() {
 		scanner := bufio.NewScanner(stdout)
@@ -104,7 +105,16 @@ func ExecuteScript(scriptName string, headers map[string]string, query map[strin
 				} else {
 					logrus.Infof("script %s responded with status code %d", scriptName, statusCode)
 				}
-				return
+
+				if hj, ok := w.(http.Hijacker); ok {
+					conn, _, err := hj.Hijack()
+					if err == nil {
+						conn.Close()
+					}
+				}
+				close(responseSent)
+
+				break
 			}
 		}
 	}()
@@ -144,10 +154,13 @@ func ExecuteScript(scriptName string, headers map[string]string, query map[strin
 		logStderr(scriptName, capturedStderr.String())
 		logrus.Errorf("script exited with exit code %d. stderr was logged", cmd.ProcessState.ExitCode())
 
-		w.WriteHeader(500)
-		w.Write(fmt.Appendf(nil, "script exited with exit code %d. stderr was logged", cmd.ProcessState.ExitCode()))
+		select {
+		case <-responseSent:
+		default:
+			w.WriteHeader(500)
+			w.Write(fmt.Appendf(nil, "script exited with exit code %d. stderr was logged", cmd.ProcessState.ExitCode()))
+		}
 	}
-
 	return nil
 }
 
