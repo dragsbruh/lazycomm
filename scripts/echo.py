@@ -30,7 +30,7 @@ resbody = body.encode()
 status_code = 200
 
 # send response
-sys.stdout.buffer.write(f"{lzy_prefix}respond {status_code} {len(resheaders)} {len(resbody)}\n".encode())
+sys.stdout.buffer.write(f"{lzy_prefix}{status_code} {len(resheaders)} {len(resbody)}\n".encode())
 sys.stdout.buffer.write(resheaders)
 sys.stdout.buffer.write(resbody)
 sys.stdout.buffer.flush()

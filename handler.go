@@ -11,9 +11,12 @@ import (
 func RequestHandler() *http.ServeMux {
 	mux := http.NewServeMux()
 
-	// w.Write([]byte("hello there! this is a lazycomm server. thank you and have a nice day!"))
-
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/" {
+			w.Write([]byte("hello there! this is a lazycomm server. thank you and have a nice day!"))
+			return
+		}
+
 		segments := strings.Split(r.URL.Path, "/")[1:]
 
 		scriptName := segments[0]
@@ -38,6 +41,7 @@ func RequestHandler() *http.ServeMux {
 			w.Write([]byte("failed to read request body"))
 			return
 		}
+
 		err = ExecuteScript(scriptName, headers, query, body, w)
 		if err != nil {
 			switch e := err.(type) {

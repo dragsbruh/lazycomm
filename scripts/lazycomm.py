@@ -19,7 +19,7 @@ method = headers["x-method"]
 
 def respond(status_code: int, headers: dict[str, str], body: bytes):
     res_headers = json.dumps(headers).encode()
-    sys.stdout.write(f"{_lzy_prefix}respond {status_code} {len(res_headers)} {len(body)}\n".encode())
+    sys.stdout.write(f"{_lzy_prefix}{status_code} {len(res_headers)} {len(body)}\n".encode())
     sys.stdout.write(res_headers)
     sys.stdout.write(body)
     sys.stdout.flush()

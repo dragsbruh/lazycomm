@@ -26,6 +26,15 @@ type ScriptDisabled struct {
 	ScriptName string
 }
 
+type PipeError struct {
+	ScriptName string
+	PipeName   string
+}
+
+type ScriptError struct {
+	ScriptName string
+}
+
 func (e ScriptNotFound) Error() string {
 	return "script not found: " + e.ScriptName
 }
@@ -34,8 +43,17 @@ func (e ScriptDisabled) Error() string {
 	return "script disabled: " + e.ScriptName
 }
 
+func (e PipeError) Error() string {
+	return "failed to create pipe " + e.PipeName + ": " + e.ScriptName
+}
+
+func (e ScriptError) Error() string {
+	return "failed to execute script: " + e.ScriptName
+}
+
 // MAIN STUFF
 
+// should not return error when response is already sent. return nil instead
 func ExecuteScript(scriptName string, headers map[string]string, query map[string]string, body []byte, w http.ResponseWriter) error {
 	if strings.HasPrefix(scriptName, "_") || strings.HasPrefix(scriptName, ".") {
 		return ScriptDisabled{ScriptName: scriptName}
@@ -49,19 +67,19 @@ func ExecuteScript(scriptName string, headers map[string]string, query map[strin
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		panic(err)
+		return PipeError{ScriptName: scriptName, PipeName: "stdin"}
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		panic(err)
+		return PipeError{ScriptName: scriptName, PipeName: "stdout"}
 	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
-		panic(err)
+		return PipeError{ScriptName: scriptName, PipeName: "stderr"}
 	}
 
 	if err := cmd.Start(); err != nil {
-		return err
+		return ScriptError{ScriptName: scriptName}
 	}
 
 	var capturedStderr strings.Builder
@@ -70,68 +88,10 @@ func ExecuteScript(scriptName string, headers map[string]string, query map[strin
 		scanner := bufio.NewScanner(stdout)
 		for scanner.Scan() {
 			line := scanner.Text()
+
 			if strings.HasPrefix(line, LZY_PREFIX) {
-				parts := strings.Split(strings.TrimPrefix(line, LZY_PREFIX), " ")
-				if len(parts) > 0 {
-					command := parts[0]
-					switch command {
-					case "respond":
-						// respond status_code headers_size body_size
-						if len(parts) < 4 {
-							w.WriteHeader(500)
-							w.Write([]byte("invalid respond command sent by script"))
-							return
-						}
-						statusCode, err := strconv.Atoi(parts[1])
-						if err != nil {
-							w.WriteHeader(500)
-							w.Write([]byte("invalid status code sent by script (status code should be an integer)"))
-							return
-						}
-						headersSize, err := strconv.Atoi(parts[2])
-						if err != nil {
-							w.WriteHeader(500)
-							w.Write([]byte("invalid headers size sent by script (header size should be an integer)"))
-							return
-						}
-						bodySize, err := strconv.Atoi(parts[3])
-						if err != nil {
-							w.WriteHeader(500)
-							w.Write([]byte("invalid body size sent by script (body size should be an integer)"))
-							return
-						}
-
-						headersBuf := make([]byte, headersSize)
-						_, err = io.ReadFull(stdout, headersBuf)
-						if err != nil {
-							w.WriteHeader(500)
-							w.Write([]byte("failed to read headers from script"))
-							return
-						}
-
-						headers := make(map[string]string)
-						err = json.Unmarshal(headersBuf, &headers)
-						if err != nil {
-							w.WriteHeader(500)
-							w.Write([]byte("failed to parse json headers from script"))
-							return
-						}
-
-						bodyBuf := make([]byte, bodySize)
-						_, err = io.ReadFull(stdout, bodyBuf)
-						if err != nil {
-							w.WriteHeader(500)
-							w.Write([]byte("failed to read body from script"))
-							return
-						}
-						for k, v := range headers {
-							w.Header().Set(k, v)
-						}
-						w.WriteHeader(statusCode)
-						w.Write(bodyBuf)
-						return
-					}
-				}
+				handleScriptResponse(strings.TrimPrefix(line, LZY_PREFIX), stdout, w)
+				return
 			}
 		}
 	}()
@@ -150,6 +110,7 @@ func ExecuteScript(scriptName string, headers map[string]string, query map[strin
 		w.WriteHeader(500)
 		w.Write([]byte("failed to marshal headers"))
 	}
+
 	queryJson, err := json.Marshal(query)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to marshal query: %s", err.Error())
@@ -165,7 +126,7 @@ func ExecuteScript(scriptName string, headers map[string]string, query map[strin
 	stdin.Close()
 
 	if err := cmd.Wait(); err != nil {
-		writeLog(scriptName, capturedStderr.String())
+		writeErrorLog(scriptName, capturedStderr.String())
 		w.WriteHeader(500)
 		w.Write(fmt.Appendf(nil, "script exited with exit code %d. stderr was logged", cmd.ProcessState.ExitCode()))
 		return nil
@@ -190,7 +151,7 @@ func getScriptPath(scriptName string) string {
 	return ""
 }
 
-func writeLog(scriptName string, log string) {
+func writeErrorLog(scriptName string, log string) {
 	os.MkdirAll(LogsDir, 0755)
 	logPath := path.Join(LogsDir, scriptName+".log")
 	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
@@ -198,6 +159,7 @@ func writeLog(scriptName string, log string) {
 		fmt.Fprintf(os.Stderr, "failed to open log file for writing: %s", err.Error())
 		return
 	}
+
 	defer f.Close()
 	_, err = f.WriteString(log)
 	if err != nil {
@@ -205,4 +167,71 @@ func writeLog(scriptName string, log string) {
 		return
 	}
 	f.WriteString("\n-----------------------------\n")
+}
+
+func handleScriptResponse(metadata string, stdout io.Reader, w http.ResponseWriter) {
+	parts := strings.Split(metadata, " ")
+
+	if len(parts) < 3 {
+		w.WriteHeader(500)
+		w.Write([]byte("invalid respond command sent by script"))
+		return
+	}
+
+	statusCodeText := parts[0]
+	headersSizeText := parts[1]
+	bodySizeText := parts[2]
+
+	statusCode, ok := parseIntOrFail(statusCodeText, "status code", w)
+	if !ok {
+		return
+	}
+	headersSize, ok := parseIntOrFail(headersSizeText, "headers size", w)
+	if !ok {
+		return
+	}
+	bodySize, ok := parseIntOrFail(bodySizeText, "body size", w)
+	if !ok {
+		return
+	}
+
+	headersBuf := make([]byte, headersSize)
+	_, err := io.ReadFull(stdout, headersBuf)
+	if err != nil {
+		w.WriteHeader(500)
+		w.Write([]byte("failed to read headers from script"))
+		return
+	}
+
+	bodyBuf := make([]byte, bodySize)
+	_, err = io.ReadFull(stdout, bodyBuf)
+	if err != nil {
+		w.WriteHeader(500)
+		w.Write([]byte("failed to read body from script"))
+		return
+	}
+
+	headers := make(map[string]string)
+	err = json.Unmarshal(headersBuf, &headers)
+	if err != nil {
+		w.WriteHeader(500)
+		w.Write([]byte("failed to parse json headers from script"))
+		return
+	}
+
+	for k, v := range headers {
+		w.Header().Set(k, v)
+	}
+	w.WriteHeader(statusCode)
+	w.Write(bodyBuf)
+}
+
+func parseIntOrFail(value string, title string, w http.ResponseWriter) (int, bool) {
+	num, err := strconv.Atoi(value)
+	if err != nil {
+		w.WriteHeader(500)
+		w.Write(fmt.Appendf(nil, "invalid %s sent by script (%s should be an integer)", title, title))
+		return 0, false
+	}
+	return num, true
 }
