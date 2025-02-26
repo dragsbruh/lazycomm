@@ -1,0 +1,8 @@
+tmp
+.log
+.vscode
+.*.py
+.*.js
+config.toml
+__pycache__
+.env
